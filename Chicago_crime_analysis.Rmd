@@ -1,0 +1,328 @@
+---
+title: "BUAN6357_Shiny2_Singh"
+author: "Sumeet k Singh"
+date: "7/11/2020"
+output:
+  html_document:
+    df_print: paged
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Loadpackages}
+if(!require('pacman'))install.packages('pacman')
+pacman::p_load(readr, ggplot2, plotly, shiny, shinythemes, 
+               tidyr, dplyr, plyr, leaflet, htmltools, stringr,shinydashboard,tidyverse,stringr,corrplot,GGally,caret,car,forcats,rpart,rpart.plot,randomForest,gbm)
+```
+
+```{r}
+movies <- read.csv("movie_metadata.csv", stringsAsFactors = TRUE)
+```
+
+```{r EDA,echo = T, results = 'hide',message=FALSE}
+dim(movies)
+colnames(movies)
+sum(duplicated(movies))
+movies <- movies[!duplicated(movies), ]
+
+```
+```{r dataclean, echo = T,results='hide'}
+movies$movie_title <- gsub("Â", "", as.character(factor(movies$movie_title)))
+str_trim(movies$movie_title, side = "right")
+str(movies)
+```
+```{r MoreCleaning,echo = T, results = 'hide'}
+movies <- movies[!is.na(movies$gross), ]
+movies <- movies[!is.na(movies$budget), ]
+dim(movies)
+
+
+sum(complete.cases(movies))
+
+
+colSums(sapply(movies, is.na))
+
+movies <- subset(movies, select = -c(aspect_ratio))
+
+str(movies)
+```
+
+```{r MC2,echo = T, results = 'hide'}
+# replace NA with column average for facenumber_in_poster
+movies$facenumber_in_poster[is.na(movies$facenumber_in_poster)] <- round(mean(movies$facenumber_in_poster, na.rm = TRUE))
+# convert 0s into NAs for other predictors
+movies[,c(5,6,8,13,24,26)][movies[,c(5,6,8,13,24,26)] == 0] <- NA
+# impute missing value with column mean
+movies$num_critic_for_reviews[is.na(movies$num_critic_for_reviews)] <- round(mean(movies$num_critic_for_reviews, na.rm = TRUE))
+movies$duration[is.na(movies$duration)] <- round(mean(movies$duration, na.rm = TRUE))
+movies$director_facebook_likes[is.na(movies$director_facebook_likes)] <- round(mean(movies$director_facebook_likes, na.rm = TRUE))
+movies$actor_3_facebook_likes[is.na(movies$actor_3_facebook_likes)] <- round(mean(movies$actor_3_facebook_likes, na.rm = TRUE))
+movies$actor_1_facebook_likes[is.na(movies$actor_1_facebook_likes)] <- round(mean(movies$actor_1_facebook_likes, na.rm = TRUE))
+movies$cast_total_facebook_likes[is.na(movies$cast_total_facebook_likes)] <- round(mean(movies$cast_total_facebook_likes, na.rm = TRUE))
+movies$actor_2_facebook_likes[is.na(movies$actor_2_facebook_likes)] <- round(mean(movies$actor_2_facebook_likes, na.rm = TRUE))
+movies$movie_facebook_likes[is.na(movies$movie_facebook_likes)] <- round(mean(movies$movie_facebook_likes, na.rm = TRUE))
+```
+
+```{r Delete,echo = T, results = 'hide'}
+#Deleting irrelevant columns
+movies <- subset(movies, select = -c(color))
+movies <- subset(movies, select = -c(language,plot_keywords))
+movies <- subset(movies, select = -c(movie_imdb_link))
+
+```
+
+```{r  Profit,echo = T, results = 'hide'}
+#RoiAndProfit
+movies <- movies %>% 
+  mutate(profit = gross - budget,
+         return_on_investment_perc = (profit/budget)*100)
+```
+
+```{r Tab1preprocess,echo = T}
+tab1 <- select(movies, country, profit, return_on_investment_perc,budget)
+#converting budget into millions
+tab1$budget <- tab1$budget/1e6
+summary(tab1)
+
+```
+
+```{r Tab2DataCleaning,echo = T, results = 'hide'}
+#Datacleaning for tab2
+g <- movies %>%
+  group_by(director_name,actor_1_name) %>%
+  arrange(desc(profit)) %>% head(10)
+g
+  
+g1 <- select(g,director_name,actor_1_name,profit)
+g1
+
+```
+
+
+```{r}
+#Preprocessing data for tab3 and 4
+tab4 <- subset(movies, select = -c(director_name, actor_2_name, actor_1_name,
+                                 movie_title, actor_3_name))
+
+tab4 <- subset(movies, select = -c(profit, return_on_investment_perc))
+
+ggcorr(tab4, label = TRUE, label_round = 2, label_size = 3.5, size = 2, hjust = .85) +
+  ggtitle("Correlation Heatmap") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r Preprocessing for RF, echo=FALSE}
+tab4$other_actors_facebook_likes <- tab4$actor_2_facebook_likes + tab4$actor_3_facebook_likes
+# use the ratio of critical reviews amount to total reviews amount
+tab4$critic_review_ratio <- tab4$num_critic_for_reviews / tab4$num_user_for_reviews
+# delete columns
+tab4 <- subset(tab4, select = -c(cast_total_facebook_likes, actor_2_facebook_likes, actor_3_facebook_likes, num_critic_for_reviews, num_user_for_reviews))
+
+
+ggcorr(tab4, label = TRUE, label_round = 2, label_size = 4, size = 3, hjust = .85) +
+  ggtitle("Correlation Heatmap") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+```{r}
+
+
+tab4$binned_score <- cut(tab4$imdb_score, breaks = c(0,4,6,8,10))
+tab4 <- subset(tab4, select = -c(country))
+
+tab4 <- tab4[,c(14,6,10,19,17,3,5,18,2,12,15,13,16,20)]
+colnames(tab4) <- c("budget", "gross", "user_vote", "critic_review_ratio",
+                    "movie_fb", "director_fb", "actor1_fb", "other_actors_fb",
+                    "duration", "face_number", "year","content",
+                    "imdb_score", "binned_score")
+```
+
+```{r}
+set.seed(42)
+train.index <- sample(row.names(tab4), dim(tab4)[1]*0.6)
+valid.index <- sample(setdiff(row.names(tab4), train.index), dim(tab4)[1]*0.2)
+test.index <- setdiff(row.names(tab4), union(train.index, valid.index))
+train <- tab4[train.index, ]
+valid <- tab4[valid.index, ]
+test <- tab4[test.index, ]
+```
+
+
+```{r RandomForest}
+set.seed(53)
+rf <- randomForest(binned_score ~ . -imdb_score, data = train, mtry = 5)
+# Show model error
+plot(rf)
+legend('topright', colnames(rf$err.rate), col=1:5, fill=1:5)
+```
+
+```{r}
+# Get importance
+importance <- importance(rf)
+varImportance <- data.frame(Variables = row.names(importance), 
+                            Importance = round(importance[ ,'MeanDecreaseGini'],2))
+
+# Create a rank variable based on importance
+rankImportance <- varImportance %>%
+  mutate(Rank = paste0('#',dense_rank(desc(Importance))))
+
+```
+
+```{r Prediction}
+set.seed(632)
+# apply model on validation set
+rf.pred.valid <- predict(rf, valid)
+# generate confusion matrix for validation data
+confusionMatrix(rf.pred.valid, valid$binned_score)
+```
+
+```{r Accuracy}
+set.seed(633)
+# apply model on test set
+rf.pred.test <- predict(rf, test)
+# generate confusion matrix for test data
+confusionMatrix(rf.pred.test, test$binned_score)
+```
+
+```{r GradientBooster,echo = T, results = 'hide'}
+set.seed(123)
+
+B1 <- gbm(binned_score ~ . -imdb_score, data = train, verbose = TRUE, shrinkage = 0.01,interaction.depth = 3, n.minobsinnode = 5,n.trees = 5000,cv.folds = 3)
+
+summary(B1)
+
+B1_IMP <- varImp(B1, numTrees = 5000)
+```
+
+
+```{r }
+shinyApp(
+  ui = navbarPage("Assignment 2 Shiny", theme = shinytheme("flatly"),
+                  tabPanel("Tab1",
+                    sidebarLayout(
+                             sidebarPanel(
+                               h3("Choose Budget of the movies in millions"),
+                               sliderInput("b","Budget",min=0.0,max=100,value = 20,step = 10)
+                                          ),
+                   mainPanel(
+                               h2("A barchart of countries and it's average ROI for all Movies "),
+                               h4("Profit = Gross - Budget"),
+                               plotlyOutput("Barplot", height = "800px", width = "1200px")
+                             )
+                    ) 
+                  ),
+                  
+                  tabPanel("Tab2",
+                          
+                   mainPanel(
+                               h2("Bubble chart of Hit Director & Actor combination"),
+                               plotlyOutput("bubble", height = "800px", width = "1200px")
+                             )
+                             
+                  ),
+                  tabPanel("Tab3",
+                      sidebarLayout(
+                             sidebarPanel(
+                               h3("Choose a model which generates a variable importance plot"),
+                               selectInput("model",label =  "Select a model:",
+                                           choices = c("Random forest","GBM"), selected = 1)
+                                          ),
+                          
+                    mainPanel(
+                               h2("Variables influencing the IMDB score the most:"),
+                               plotlyOutput("Importance", height = "800px", width = "1200px")
+                             )
+                             
+                                    )
+                  ),
+                  tabPanel("Tab4",
+                      sidebarLayout(
+                             sidebarPanel(
+                               h3("Enter a Year Input"),
+                               selectInput("x",label =  "Select a year:",
+                                           choices = movies$title_year, selected = 1)
+                                           ),
+                  mainPanel(
+                              h2("Scatter plot to Determine if Facebook likes depend on the budget of the Movies"),
+                               plotlyOutput("tab4", height = "800px", width = "1200px")
+                            )
+                                    )
+                            )
+                  ),
+  
+  server = function(input, output) {
+                                
+      output$Barplot <- renderPlotly({
+      
+        x1 <- list(
+  title = "ROI percentage"
+)
+y1 <- list(
+  title = "Countries"
+)
+      tab1 %>%
+         filter(budget == input$b) %>%
+  plot_ly(x = ~return_on_investment_perc, y = ~country, alpha = 1.0, type = "bar") %>% layout(xaxis = x1, yaxis = y1)
+        
+      })
+      
+      
+    output$bubble <- renderPlotly({
+    
+        ggplot(g1)+aes(actor_1_name,director_name,size=profit)+geom_point((aes(color = factor(profit))),alpha=0.7)+scale_size(range=c(.1,15))+ theme_minimal() +theme(axis.text.x = element_text(angle = 45, hjust = 1))+xlab("Lead Actors")+ylab("Directors")+ labs(fill = "Profit")
+
+  
+        })
+    
+    output$Importance <- renderPlotly({
+      
+      if(input$model == "Random forest"){
+        
+  ggplot(rankImportance, aes(x = reorder(Variables, Importance), 
+                           y = Importance, fill = Importance)) +
+  geom_bar(stat='identity') + 
+  geom_text(aes(x = Variables, y = 0.5, label = Rank),
+            hjust=0, vjust=0.55, size = 4, colour = 'red') +
+  labs(x = 'Variables') +
+  coord_flip() + 
+  theme_classic()
+      
+        }
+      
+      else if (input$model == "GBM"){
+       
+        ggplot2::ggplot(B1_IMP, aes(x=reorder(rownames(B1_IMP),Overall), y=Overall)) +
+geom_point( color="blue", size=4, alpha=0.6)+
+geom_segment( aes(x=rownames(B1_IMP), xend=rownames(B1_IMP), y=0, yend=Overall), 
+color='skyblue') +
+xlab('Variable')+
+ylab('Overall Importance')+
+theme_light() +
+coord_flip() 
+        }
+ })
+    
+    
+     output$tab4 <- renderPlotly({
+       
+        x2 <- list(
+  title = "No of Likes on Movies on FB"
+)
+y2 <- list(
+  title = "No of Likes on Actors on FB"
+)
+       movies %>%
+         filter(title_year == input$x) %>%
+  plot_ly(x = ~movie_facebook_likes, y = ~actor_1_facebook_likes, color = ~budget , mode = "markers", text = ~movie_title, alpha = 1.0, type = "scatter") %>% layout(xaxis = x2, yaxis = y2)
+     })
+     
+     
+     
+  }
+)
+
+
+```
+
